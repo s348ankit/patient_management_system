@@ -1,19 +1,19 @@
+import os
 from flask import Flask, request, render_template_string, jsonify, session, redirect, url_for
 import pandas as pd
 import sqlite3
-import os
 from datetime import datetime
 import uuid
 import hashlib
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key'  # Replace with a secure key in production
-UPLOAD_FOLDER = 'uploads'
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'fallback-secret-key-1234567890')  # Fallback for local dev
+UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')  # Default to 'uploads' if not set
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Initialize SQLite database
 def init_db():
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))  # Default to 'clinic.db'
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS patients (
         patient_id TEXT PRIMARY KEY, name TEXT, mobile_number TEXT UNIQUE, age INTEGER, address TEXT
@@ -45,14 +45,14 @@ def init_db():
         {'username': 'doctor', 'password': hashlib.sha256('doc123'.encode()).hexdigest(), 'role': 'doctor'},
         {'username': 'pharmacist', 'password': hashlib.sha256('pharm123'.encode()).hexdigest(), 'role': 'pharmacist'}
     ]
-    pd.DataFrame(users).to_csv(f'{UPLOAD_FOLDER}/users.csv', index=False)
+    pd.DataFrame(users).to_csv(os.path.join(UPLOAD_FOLDER, 'users.csv'), index=False)
 
 init_db()
 
 # Helper functions
 def save_to_csv(table_name, data):
     df = pd.DataFrame(data)
-    df.to_csv(f'{UPLOAD_FOLDER}/{table_name}.csv', index=False)
+    df.to_csv(os.path.join(UPLOAD_FOLDER, f'{table_name}.csv'), index=False)
 
 def send_whatsapp_message(mobile, message):
     print(f"Sending WhatsApp to {mobile}: {message}")
@@ -66,7 +66,7 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = hashlib.sha256(request.form['password'].encode()).hexdigest()
-        users = pd.read_csv(f'{UPLOAD_FOLDER}/users.csv')
+        users = pd.read_csv(os.path.join(UPLOAD_FOLDER, 'users.csv'))
         user = users[(users['username'] == username) & (users['password'] == password)]
         if not user.empty:
             session['username'] = username
@@ -118,7 +118,7 @@ def receptionist_dashboard():
             'appointment_date': request.form['appointment_date'],
             'booking_type': request.form['booking_type']
         }
-        conn = sqlite3.connect('clinic.db')
+        conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
         c = conn.cursor()
         # Check for existing patient by mobile number
         c.execute('SELECT patient_id FROM patients WHERE mobile_number = ?', (data['mobile_number'],))
@@ -160,14 +160,17 @@ def receptionist_dashboard():
         c.execute('''INSERT INTO appointments (id, patient_id, reason, booking_date, appointment_date, booking_type, confirmed, checkin_status, checkin_time)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                      (appointment_id, patient_id, data['reason'], booking_date, data['appointment_date'], data['booking_type'], 0, '', ''))
+        c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
+                  (appointment_id, 'In-Person'))
         conn.commit()
         conn.close()
         send_whatsapp_message(data['mobile_number'], f"Appointment booked for {data['appointment_date']}")
         if data['booking_type'] != 'Manual In-Clinic':
             send_whatsapp_message(data['mobile_number'], "Appointment confirmation pending from clinic")
-        save_to_csv('patients', pd.read_sql_query("SELECT * FROM patients", sqlite3.connect('clinic.db')).to_dict('records'))
-        save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect('clinic.db')).to_dict('records'))
-    conn = sqlite3.connect('clinic.db')
+        save_to_csv('patients', pd.read_sql_query("SELECT * FROM patients", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+        save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+        save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('''SELECT a.*, p.name, p.mobile_number, p.age, p.address, d.chief_complaints, d.symptoms, d.mind, d.psychology, 
                  d.diagnosis, d.medicines, d.tests, d.next_visit, d.diagnosis_saved, d.medicines_prescribed, 
@@ -420,7 +423,7 @@ def receptionist_dashboard():
 def doctor_dashboard():
     if 'role' not in session or session['role'] != 'doctor':
         return redirect(url_for('login'))
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('''SELECT a.*, p.name, p.mobile_number, p.age, p.address, d.chief_complaints, d.symptoms, d.mind, d.psychology, 
                  d.diagnosis, d.medicines, d.tests, d.next_visit, d.diagnosis_saved, d.medicines_prescribed, 
@@ -597,7 +600,7 @@ def doctor_dashboard():
 def pharmacist_dashboard():
     if 'role' not in session or session['role'] != 'pharmacist':
         return redirect(url_for('login'))
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('''SELECT a.*, p.name, p.mobile_number, p.age, p.address, d.chief_complaints, d.symptoms, d.mind, d.psychology, 
                  d.diagnosis, d.medicines, d.tests, d.next_visit, d.diagnosis_saved, d.medicines_prescribed, 
@@ -730,7 +733,7 @@ def book_appointment():
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
     data = request.json
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     # Check for existing patient
     c.execute('SELECT patient_id FROM patients WHERE mobile_number = ?', (data['mobile_number'],))
@@ -761,16 +764,16 @@ def book_appointment():
     send_whatsapp_message(data['mobile_number'], f"Appointment booked for {data['appointment_date']}")
     if data['booking_type'] != 'Manual In-Clinic':
         send_whatsapp_message(data['mobile_number'], "Appointment confirmation pending from clinic")
-    save_to_csv('patients', pd.read_sql_query("SELECT * FROM patients", sqlite3.connect('clinic.db')).to_dict('records'))
-    save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect('clinic.db')).to_dict('records'))
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('patients', pd.read_sql_query("SELECT * FROM patients", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+    save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Appointment booked'})
 
 @app.route('/check_in/<id>/<status>', methods=['POST'])
 def check_in(id, status):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     # Only update check-in status and time, no new entries
     c.execute('UPDATE appointments SET checkin_status = ?, checkin_time = ? WHERE id = ?',
@@ -782,14 +785,14 @@ def check_in(id, status):
         return jsonify({'message': 'Appointment not found'}), 404
     conn.commit()
     conn.close()
-    save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('appointments', pd.read_sql_query("SELECT * FROM appointments", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Checked in'})
 
 @app.route('/diagnosis/<id>', methods=['GET'])
 def get_diagnosis(id):
     if 'role' not in session or session['role'] != 'doctor':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('SELECT * FROM diagnoses WHERE appointment_id = ?', (id,))
     diagnosis = c.fetchone()
@@ -813,7 +816,7 @@ def save_diagnosis(id):
         return jsonify({'message': 'Unauthorized'}), 403
     data = request.json
     medicines_prescribed = 1 if data['medicines'].strip() else 0
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('''INSERT OR REPLACE INTO diagnoses (appointment_id, chief_complaints, symptoms, mind, psychology, diagnosis, medicines, tests, next_visit, diagnosis_saved, medicines_prescribed)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -826,15 +829,15 @@ def save_diagnosis(id):
         mobile = c.fetchone()[0]
         send_whatsapp_message(mobile, "Medicines prescribed")
     conn.close()
-    save_to_csv('diagnoses', pd.read_sql_query("SELECT * FROM diagnoses", sqlite3.connect('clinic.db')).to_dict('records'))
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('diagnoses', pd.read_sql_query("SELECT * FROM diagnoses", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Diagnosis and prescription saved'})
 
 @app.route('/prepare_medicine/<id>', methods=['POST'])
 def prepare_medicine(id):
     if 'role' not in session or session['role'] != 'pharmacist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
               (id, 'In-Person'))
@@ -844,17 +847,20 @@ def prepare_medicine(id):
     conn.commit()
     conn.close()
     send_whatsapp_message(mobile, "Medicines prepared")
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Medicines prepared'})
 
 @app.route('/billing/<id>', methods=['GET'])
 def get_billing(id):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
+              (id, 'In-Person'))
     c.execute('SELECT * FROM billing WHERE appointment_id = ?', (id,))
     billing = c.fetchone()
+    conn.commit()
     conn.close()
     return jsonify({
         'consultation_charge': float(billing[1]) if billing and billing[1] is not None else 0.0,
@@ -879,7 +885,7 @@ def billing_prepare(id):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
     data = request.json
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
     c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
               (id, 'In-Person'))
@@ -902,15 +908,17 @@ def billing_prepare(id):
                   id))
     conn.commit()
     conn.close()
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Billing saved'})
 
 @app.route('/hand_over_medicine/<id>', methods=['POST'])
 def hand_over_medicine(id):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
+              (id, 'In-Person'))
     c.execute('SELECT medicines_prepared FROM billing WHERE appointment_id = ?', (id,))
     prepared = c.fetchone()
     if not prepared or not prepared[0]:
@@ -922,15 +930,17 @@ def hand_over_medicine(id):
     conn.commit()
     conn.close()
     send_whatsapp_message(mobile, "Medicines handed over")
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Medicine handed over'})
 
 @app.route('/courier_done/<id>', methods=['POST'])
 def courier_done(id):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
+              (id, 'In-Person'))
     c.execute('SELECT medicines_prepared, delivery_type FROM billing WHERE appointment_id = ?', (id,))
     billing = c.fetchone()
     if not billing or not billing[0]:
@@ -945,15 +955,17 @@ def courier_done(id):
     conn.commit()
     conn.close()
     send_whatsapp_message(mobile, "Medicines couriered")
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Courier done'})
 
 @app.route('/complete_checkout/<id>', methods=['POST'])
 def complete_checkout(id):
     if 'role' not in session or session['role'] != 'receptionist':
         return jsonify({'message': 'Unauthorized'}), 403
-    conn = sqlite3.connect('clinic.db')
+    conn = sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))
     c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO billing (appointment_id, consultation_charge, medicine_charge, courier_charge, delivery_type, medicines_prepared) VALUES (?, 0, 0, 0, ?, 0)',
+              (id, 'In-Person'))
     c.execute('SELECT medicines_prepared, medicines_handed_over, couriered, consultation_charge, medicine_charge, courier_charge, amount_paid, discount FROM billing WHERE appointment_id = ?', (id,))
     billing = c.fetchone()
     if not billing or (not billing[1] and not billing[2]):
@@ -968,8 +980,7 @@ def complete_checkout(id):
     conn.commit()
     conn.close()
     send_whatsapp_message(mobile, "Checkout completed")
-    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect('clinic.db')).to_dict('records'))
+    save_to_csv('billing', pd.read_sql_query("SELECT * FROM billing", sqlite3.connect(os.getenv('DATABASE_PATH', 'clinic.db'))).to_dict('records'))
     return jsonify({'message': 'Checkout completed'})
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# No app.run() for production; Gunicorn handles server startup

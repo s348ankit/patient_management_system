@@ -84,7 +84,7 @@ def login():
 </head>
 <body class="bg-gradient-to-r from-blue-500 to-purple-600 min-h-screen flex items-center justify-center">
     <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Clinic Management System</h1>
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Way2Cure Kharghar Clinic Management System</h1>
         {% if error %}
         <p class="text-red-500 text-center">{{ error }}</p>
         {% endif %}
@@ -984,3 +984,4 @@ def complete_checkout(id):
     return jsonify({'message': 'Checkout completed'})
 
 # No app.run() for production; Gunicorn handles server startup
+
